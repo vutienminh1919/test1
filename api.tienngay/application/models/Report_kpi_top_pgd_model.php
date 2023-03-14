@@ -1,0 +1,217 @@
+<?php if (!defined('BASEPATH')) exit('No direct script access allowed');
+
+class Report_kpi_top_pgd_model extends CI_Model
+{
+
+	private $collection = 'report_kpi_top_pgd';
+	private $collection_ct = 'contract';
+
+	private $manager, $createdAt;
+
+	public function __construct()
+	{
+		parent::__construct();
+		$this->load->model("temporary_plan_contract_model");
+		$this->manager = new MongoDB\Driver\Manager($this->config->item("mongo_db")['dsn'],$this->config->item("mongo_db")['options']);
+		$this->createdAt = $this->time_model->convertDatetimeToTimestamp(new DateTime());
+	}
+	public function findOne($condition){
+		return $this->mongo_db->where($condition)->find_one($this->collection);
+	}
+	public function count($condition){
+		return $this->mongo_db->where($condition)->count($this->collection);
+	}
+	public function find_where($field="", $in=array()){
+		return $this->mongo_db
+			->where_in($field, $in)->order_by(array('updated_at' => 'DESC'))->get($this->collection);
+	}
+	public function update($condition, $set){
+		return $this->mongo_db->where($condition)->set($set)->update($this->collection);
+	}
+	public function insert($data)
+		{
+			return $this->mongo_db->insert($this->collection, $data);
+		}
+	public function delete($condition){
+		return $this->mongo_db->where($condition)->delete($this->collection);
+	}
+		public function find_select_top($condition_date=array(),$match_in = array())
+	{
+		
+		if (!empty($condition_date)) {
+			
+				$match_in['disbursement_date'] = $condition_date;
+			
+		}
+		
+		$condition = array();
+		$conditions = [
+			'aggregate' => $this->collection_ct,
+			'pipeline' => [
+			['$lookup' =>
+				[
+					'from' => 'temporary_plan_contract',
+					'let' => array(
+						"code_contract" => '$code_contract', // $symbol = field 'symbol' của 'aggregate' => $this->collection
+					),
+					'pipeline' => array(
+						array(
+							'$match' => array(
+								'$expr' => array(
+									'$and' => array(
+										array(
+											'$eq' => array('$code_contract', '$$code_contract')
+										),
+										array(
+											'$lt' => array('ngay_ky_tra', $this->createdAt-10* 24 * 3600)
+										),
+										array(
+											'$eq' => array('$status', 1)
+										),
+									)
+								)
+							),
+						),
+						array(
+								'$project' => [
+									'tien_goc_1ky_con_lai' => 1,
+									
+								]
+							)
+					),
+					'as' => "lai_ky_truoc_do"
+				]
+			],
+		    	['$lookup' =>
+				[
+					'from' => 'temporary_plan_contract',
+					'let' => array(
+						"code_contract" => '$code_contract', // $symbol = field 'symbol' của 'aggregate' => $this->collection
+					),
+					'pipeline' => array(
+						array(
+							'$match' => array(
+								'$expr' => array(
+									'$and' => array(
+										array(
+											'$eq' => array('$code_contract', '$$code_contract')
+										),
+										
+										array(
+											'$eq' => array('$status', 1)
+										),
+									)
+								)
+							),
+						),
+						array(
+								'$project' => [
+									'tien_goc_1ky_con_lai' => 1,
+									
+								]
+							)
+					),
+					'as' => "list_dang_cho_vay"
+				]
+			],
+		
+			[   
+                '$match' => $match_in ? : (object) []
+           ],
+   
+           ['$project' =>
+					[
+						'_id'=>'$_id',
+						"so_tien_vay" =>[
+							'$sum' => array('$toLong' => '$loan_infor.amount_money')
+					        ],
+						"du_no_qua_han" =>[
+							'$sum' => '$lai_ky_truoc_do.tien_goc_1ky_con_lai'
+						],
+					     "du_no_dang_cho_vay" =>[
+							'$sum' => '$list_dang_cho_vay.tien_goc_1ky_con_lai'
+					         ],
+					   // 'so_hop_dong_moi'=>'$hop_dong_moi'
+
+					    ]
+			],
+			 
+
+			],
+			'cursor' => new stdClass,
+		];
+
+		$command = new MongoDB\Driver\Command($conditions);
+		$arr = array();
+		$cursor = $this->manager->executeCommand($this->config->item("current_DB"), $command);
+		foreach ($cursor as $item) {
+			array_push($arr, $item);
+		}
+		return $arr;
+	}
+
+
+    
+	public function sum_where($condtion = array(),$get){
+		$ops = array(
+			array (
+				'$match' => $condtion
+			),
+			array(
+				'$group' => array(
+					'_id' => null,
+					'total' => array('$sum' =>  $get ),
+				),
+			),
+		);
+		$data = $this->mongo_db->aggregate($this->collection, $ops)->toArray();
+		if(isset($data[0]['total'])){
+			return $data[0]['total'];
+		}else{
+			return 0;
+		}
+
+	}
+	public function getKpiByTime($searchLike, $condition, $limit = 30, $offset = 0)
+	{
+		$mongo = $this->mongo_db;
+		$where = array();
+		$in = array();
+		$order_by = ['date' => 'DESC'];
+		if (isset($condition['start']) && isset($condition['end'])) {
+			$where['date'] = array(
+				'$gte' => $condition['start'],
+				'$lte' => $condition['end']
+			);
+			unset($condition['start']);
+			unset($condition['end']);
+		}
+	if (!empty($where)) {
+			$mongo = $mongo->set_where($where);
+		}
+		if (isset($condition['code_area'])) {
+			$mongo = $mongo->where_in('code_area', $condition['code_area']);
+		}
+		if (isset($condition['code_region'])) {
+			$mongo = $mongo->where_in('code_region', $condition['code_region']);
+		}
+		if (isset($condition['code_domain'])) {
+			$mongo = $mongo->where_in('code_domain', $condition['code_domain']);
+		}
+		if (isset($condition['code_store'])) {
+			$mongo = $mongo->where_in('store.id', $condition['code_store']);
+		}
+	
+
+		
+		if (isset($condition['total'])) {
+			return $mongo->count($this->collection);
+		} else {
+		return $mongo->order_by($order_by)
+			->limit($limit)
+			->offset($offset)
+			->get($this->collection);
+		}
+	}
+	
+}
